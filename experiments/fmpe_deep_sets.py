@@ -64,7 +64,9 @@ class DeepSetRho(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.network(x)
+        # Sum aggregation for permutation invariance
+        aggregated = x.sum(dim=1)  # Assuming x has shape [batch_size, set_size, features]
+        return self.network(aggregated)
 
 class DeepSetFMPE(nn.Module):
     """
@@ -139,7 +141,7 @@ class DeepSetFMPE(nn.Module):
         theta, x, t_embedded = broadcast(theta, x, t_embedded, ignore=1)
         input_tensor = torch.cat((theta, x, t_embedded), dim=-1)        
         phi_output = self.phi(input_tensor)
-        final_output = self.rho(phi_output)
+        final_output = self.rho(phi_output.unsqueeze(1)) # Adjust for expected shape [batch_size, set_size, features]
         return final_output
 
     def flow(self, x: Tensor) -> Distribution:
