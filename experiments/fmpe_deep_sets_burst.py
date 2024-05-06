@@ -121,41 +121,44 @@ LABELS = [f'$t0_{i+1}$' for i in range(max_ncomp)] + \
 LOWER = torch.tensor([t0_lower]*max_ncomp + [amp_val]*max_ncomp + [rise_val]*max_ncomp + [skew_val]*max_ncomp)
 UPPER = torch.tensor([t0_upper]*max_ncomp + [amp_val]*max_ncomp + [rise_val]*max_ncomp + [skew_val]*max_ncomp)
 
-# Plot the synthetic data
+# Plot the synthetic data with brighter colors
 plt.figure(figsize=(8, 4))
-plt.plot(time, ymodel_star, label='True Model')
-plt.plot(time, ycounts_star, label='Observed Counts')
+plt.plot(time, ymodel_star, label='True Model', color='red', linewidth=2)
+plt.plot(time, ycounts_star, label='Observed Counts', color='blue', linewidth=2, alpha=0.7)
 plt.xlabel('Time')
 plt.ylabel('Flux')
 plt.title(f'Synthetic Data (N={ncomp_star})')
-plt.legend()
+plt.legend(fontsize=12)
 plt.tight_layout()
-plt.show()
+plt.savefig('experiments/plots/synthetic_data.png')  # Save the plot to the 'plots' folder
+plt.close()  # Close the current figure
 
-# Plot the joint posterior p(t0, N | x)
+# Plot the joint posterior p(t0, N | x) with brighter colors
 fig, axes = plt.subplots(1, max_ncomp, figsize=(12, 4))
 for ncomp, ax in enumerate(axes, start=1):
-    ax.hist(samples_t0_given_x_N[ncomp-1][:, 0].numpy(), bins=50, density=True, alpha=0.7, label=f'$p(t0 | x, N={ncomp})$')
-    ax.axvline(theta_star[0].item(), color='red', linestyle='--', label='True $t0$')
+    ax.hist(samples_t0_given_x_N[ncomp-1][:, 0].numpy(), bins=50, density=True, alpha=0.7, label=f'$p(t0 | x, N={ncomp})$', color='orange')
+    ax.axvline(theta_star[0].item(), color='red', linestyle='--', label='True $t0$', linewidth=2)
     ax.set_xlabel(f'$t0$ (N={ncomp})')
     ax.set_ylabel('Density')
     ax.set_title(f'Posterior p(t0 | x, N={ncomp})')
-    ax.legend()
+    ax.legend(fontsize=12)
 plt.tight_layout()
-plt.show()
+plt.savefig('experiments/plots/joint_posterior_t0_N.png')  # Save the plot to the 'plots' folder
+plt.close()  # Close the current figure
 
-# Plot the posterior p(N | x)
+# Plot the posterior p(N | x) with brighter colors
 plt.figure(figsize=(6, 4))
-plt.bar(range(1, max_ncomp+1), p_N_given_x.squeeze().numpy(), alpha=0.7)
-plt.axvline(ncomp_star, color='red', linestyle='--', label='True N')
+plt.bar(range(1, max_ncomp+1), p_N_given_x.squeeze().numpy(), alpha=0.7, color='green')
+plt.axvline(ncomp_star, color='red', linestyle='--', label='True N', linewidth=2)
 plt.xlabel('Number of Components (N)')
 plt.ylabel('Probability')
 plt.title('Posterior p(N | x)')
-plt.legend()
+plt.legend(fontsize=12)
 plt.tight_layout()
-plt.show()
+plt.savefig('experiments/plots/joint_posterior_N.png')  # Save the plot to the 'plots' folder
+plt.close()  # Close the current figure
 
-# Plot the joint posterior p(t0, N | x) as a heatmap
+# Plot the joint posterior p(t0, N | x) as a heatmap with brighter colors
 t0_range = np.linspace(t0_lower, t0_upper, 100)
 N_range = np.arange(1, max_ncomp+1)
 joint_posterior = np.zeros((len(N_range), len(t0_range)))
@@ -178,4 +181,5 @@ plt.xlabel('$t0$')
 plt.ylabel('Number of Components (N)')
 plt.title('Joint Posterior p(t0, N | x)')
 plt.tight_layout()
-plt.show()
+plt.savefig('experiments/plots/joint_posterior_heatmap.png')  # Save the plot to the 'plots' folder
+plt.close()  # Close the current figure
