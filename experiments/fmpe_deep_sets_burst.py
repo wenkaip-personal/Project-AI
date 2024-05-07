@@ -106,6 +106,21 @@ with torch.no_grad():
     # Apply the condition without the extra dimension
     filtered_samples = samples_theta_given_x_N[torch.where(samples_theta_given_x_N[:, 0] <= t0_upper)]
     p_N_given_x = num_estimator(x_star.unsqueeze(0))
+    Ns = torch.multinomial(p_N_given_x, 10000, replacement=True).squeeze()
+
+    # Create a tensor to store the sampled thetas
+    sampled_thetas = torch.zeros((10000, 4 * max_ncomp))
+
+    # Sample p(theta | N, x) for each sampled N
+    for N in range(1, max_ncomp + 1):
+        mask = (Ns == N - 1)  # Adjust the mask to match 0-based index
+        if mask.any():
+            x_repeated = x_star.unsqueeze(0).repeat(mask.sum(), 1)
+            sampled_thetas_N = estimator.flow(x_repeated).sample()
+            sampled_thetas[mask, :sampled_thetas_N.size(1)] = sampled_thetas_N
+
+    # Group the sampled thetas by N
+    grouped_thetas = [sampled_thetas[Ns == N - 1, :4*N] for N in range(1, max_ncomp + 1)]
 
 # Compute the joint posterior p(theta, N | x) = p(theta | x, N) * p(N | x)
 joint_posterior = torch.exp(log_p_theta_given_x_N).squeeze() * p_N_given_x.squeeze()
@@ -225,3 +240,35 @@ plt.title('Joint Log Posterior p(theta, N | x)')
 plt.tight_layout()
 plt.savefig('experiments/plots/joint_log_posterior_heatmap.png')  # Save the plot to the 'plots' folder
 plt.close()  # Close the current figure
+
+# Plot the joint posterior p(theta, N | x) using the sampled thetas
+fig, axes = plt.subplots(4, max_ncomp, figsize=(4*max_ncomp, 12))
+
+for i in range(4):
+    for j in range(max_ncomp):
+        if i == 0:
+            for N, thetas in enumerate(grouped_thetas, start=1):
+                if thetas.size(0) > 0:
+                    idx = j
+                    if idx < thetas.size(1) // 4:
+                        axes[i, j].hist(thetas[:, idx].numpy(), bins=30, density=True, alpha=0.5, label=f'N={N}')
+                        axes[i, j].axvline(theta_star[idx].item(), color='red', linestyle='--', linewidth=2)
+                        axes[i, j].set_xlabel(LABELS[idx])
+                        axes[i, j].set_ylabel('Density')
+            if j == max_ncomp - 1:
+                axes[i, j].legend()
+        else:
+            for N, thetas in enumerate(grouped_thetas, start=1):
+                if thetas.size(0) > 0:
+                    idx = i*max_ncomp + j
+                    if j < thetas.size(1) // 4 and idx < thetas.size(1):
+                        axes[i, j].scatter(thetas[:, j].numpy(), thetas[:, idx].numpy(), s=5, alpha=0.5, label=f'N={N}')
+                        axes[i, j].axvline(theta_star[j].item(), color='red', linestyle='--', linewidth=1)
+                        axes[i, j].axhline(theta_star[idx].item(), color='red', linestyle='--', linewidth=1)
+                        axes[i, j].set_xlabel(LABELS[j])
+                        axes[i, j].set_ylabel(LABELS[idx])
+
+plt.suptitle('Joint Posterior p(theta, N | x)')
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.savefig('experiments/plots/joint_posterior_theta_N_sampled.png')
+plt.close()
