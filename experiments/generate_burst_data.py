@@ -92,11 +92,11 @@ def combined_twoexp(time, t0, amp, rise, skew, ybkg=0.0):
     return ym
 
 
-def simulate_burst(time, ncomp, burstparams, ybkg, return_model=False):
+def simulate_burst(time, ncomp, burstparams, ybkg, return_model=False, noise_type='poisson'):
     """
     Simulate a realistic burst using a linear combination 
     of `twoexp` function components, a background 
-    count rate and poisson noise.
+    count rate and noise.
     
     The array `burstparams` contains the parameters for 
     each call of the `twoexp` function. It is a flat 
@@ -125,15 +125,21 @@ def simulate_burst(time, ncomp, burstparams, ybkg, return_model=False):
         The background flux
         
     return_model : bool, default False
-        If True, return the model flux (without Poisson
-        counts) along with the Poisson-drawn model 
-        counts. If False, just contain the Poisson counts
+        If True, return the model flux (without noise)
+        along with the noisy model counts. If False, 
+        just contain the noisy counts
+        
+    noise_type : str, default 'poisson'
+        The type of noise to add to the model. Can be
+        either 'poisson' or 'gaussian'. If 'gaussian',
+        the noise will be drawn from a Gaussian distribution
+        with a smaller variance.
 
     Returns
     -------
     ycounts : numpy.ndarray
         An array of the same size of $t$, returning the 
-        model counts    
+        model counts with noise    
     """
     if len(burstparams) != 4*ncomp:
         raise ValueError("`burstparams` must contain all burst model parameters!")
@@ -144,12 +150,17 @@ def simulate_burst(time, ncomp, burstparams, ybkg, return_model=False):
     skew = burstparams[(3*ncomp):]
     
     ym = combined_twoexp(time, t0, amp, rise, skew, ybkg)
-    ycounts = np.random.poisson(ym)
+    
+    if noise_type == 'poisson':
+        ycounts = np.random.poisson(ym)
+    elif noise_type == 'gaussian':
+        noise_std = 0.1 * np.sqrt(ym)  # Adjust the noise standard deviation as needed
+        ycounts = ym + np.random.normal(0, noise_std)
+    else:
+        raise ValueError("Invalid noise type. Choose 'poisson' or 'gaussian'.")
     
     if return_model:
         return ym, ycounts
 
     else:
         return ycounts
-    
-
