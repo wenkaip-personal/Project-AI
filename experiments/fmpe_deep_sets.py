@@ -89,7 +89,7 @@ class DeepSetFMPE(nn.Module):
         x_dim (int): The dimensionality of the observation space.
         freqs (int, optional): The number of frequencies to use for time embedding.
     """
-    def __init__(self, theta_dim: int, x_dim: int, freqs: int = 3):
+    def __init__(self, theta_dim: int, x_dim: int, freqs: int):
         super().__init__()
         self.phi = DeepSetPhi(input_dim=theta_dim + x_dim + 2 * freqs, output_dim=128)
         self.rho = DeepSetRho(input_dim=128, output_dim=theta_dim)
@@ -133,15 +133,15 @@ class DeepSetFMPE(nn.Module):
         Returns:
             Tensor: The output vector for the entire set, representing the transformed
                     parameters at time t.
-        """   
+        """
         t = t.unsqueeze(-1)
         t_cos = torch.cos(t * self.freqs)
         t_sin = torch.sin(t * self.freqs)
         t_embedded = torch.cat((t_cos, t_sin), dim=-1)
         theta, x, t_embedded = broadcast(theta, x, t_embedded, ignore=1)
-        input_tensor = torch.cat((theta, x, t_embedded), dim=-1)      
+        input_tensor = torch.cat((theta, x, t_embedded), dim=-1)
         phi_output = self.phi(input_tensor)
-        final_output = self.rho(phi_output.unsqueeze(1))  # Adjust for expected shape [batch_size, set_size, features]
+        final_output = self.rho(phi_output.unsqueeze(1))
         return final_output
 
     def flow(self, x: Tensor) -> Distribution:
@@ -231,4 +231,5 @@ class DeepSetFMPELoss(nn.Module):
         v = eps - theta
 
         return (self.estimator(theta_prime, x, t) - v).square().mean()
+
 

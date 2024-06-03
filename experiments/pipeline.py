@@ -75,6 +75,7 @@ for epoch in (bar := trange(128, unit='epoch')):
     num_losses = []
 
     for _ in range(256):  # 256 batches per epoch
+        # np.random.seed(None)  # Reset the seed to None to get different results each time
         # ncomp = np.random.choice(range(1, max_ncomp+1))  # Randomly choose the number of components
         ncomp = 2
         burstparams = generate_burst_params(ncomp)
@@ -93,6 +94,7 @@ for epoch in (bar := trange(128, unit='epoch')):
 
     bar.set_postfix(loss=torch.stack(losses).mean().item(), num_loss=torch.stack(num_losses).mean().item())
 
+# np.random.seed(None)  # Reset the seed to None to get different results each time
 # ncomp_star = np.random.choice(range(1, max_ncomp+1))
 ncomp_star = 2
 burstparams_star = generate_burst_params(ncomp_star)
