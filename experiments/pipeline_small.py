@@ -68,54 +68,68 @@ num_step = GDStep(num_optimizer, clip=1.0)
 ncomp = 2
 burstparams = generate_burst_params(ncomp)
 ymodel, ycounts = simulate_burst(time, ncomp, burstparams, ybkg*10, return_model=True, noise_type='gaussian')
-theta = torch.from_numpy(burstparams).float()
-x = torch.from_numpy(ycounts).float()
+fixed_theta = torch.from_numpy(burstparams).float()
+fixed_x = torch.from_numpy(ycounts).float()
 num_target = torch.tensor([ncomp - 1], dtype=torch.long)  # Adjust the target to 0-based index
 
 # Ensure theta has the maximum theta dimension by padding
-pad_size = 4 * max_ncomp - theta.size(0)
+pad_size = 4 * max_ncomp - fixed_theta.size(0)
 if pad_size > 0:
-    theta = F.pad(theta, (0, pad_size), "constant", 0)
+    fixed_theta = F.pad(fixed_theta, (0, pad_size), "constant", 0)
 
-# Training loop
+# Training loop for overfitting
 estimator.train()
 num_estimator.train()
 
-loss_values = []
+overfit_loss_values = []
 start_time = time_module.time()
 
-for epoch in range(128):
-    loss_value = step(loss(theta, x))
-    num_loss_value = num_step(categorical_loss(num_estimator(x.unsqueeze(0)), num_target))  # Ensure x is batched
-    loss_values.append(loss_value.item())
-    print(f"Epoch {epoch+1}, Loss: {loss_value.item()}, Categorical Loss: {num_loss_value.item()}")
+for epoch in range(10000):
+    optimizer.zero_grad()  # Clear gradients for the estimator
+    num_optimizer.zero_grad()  # Clear gradients for the categorical model
+    
+    loss_value = loss(fixed_theta, fixed_x)
+    num_loss_value = categorical_loss(num_estimator(fixed_x.unsqueeze(0)), num_target)  # Ensure x is batched
+    
+    # Backpropagate the losses
+    loss_value.backward()
+    num_loss_value.backward()
+    
+    # Step the optimizers
+    optimizer.step()
+    num_optimizer.step()
+    
+    overfit_loss_values.append(loss_value.item())
+    if epoch % 1000 == 0:
+        print(f"Overfitting Epoch {epoch+1}, Loss: {loss_value.item()}, Categorical Loss: {num_loss_value.item()}")
 
 training_time = time_module.time() - start_time
 print(f"Training completed in {training_time:.2f} seconds.")
 
-# Evaluation
+# Evaluation after overfitting
 estimator.eval()
 num_estimator.eval()
 
 with torch.no_grad():
-    samples_theta_given_x_N = estimator.flow(x).sample((1000,))
+    samples_theta_given_x_N = estimator.flow(fixed_x).sample((1000,))
     mean_sample = samples_theta_given_x_N.mean(0)
-    print("Input theta:", theta)
-    print("Mean of sampled thetas from posterior:", mean_sample)
+    print("Fixed Input theta:", fixed_theta)
+    print("Mean of sampled thetas from posterior after overfitting:", mean_sample)
 
     # Plotting the samples using corner
     figure = corner.corner(samples_theta_given_x_N.numpy(), labels=[f"Param {i+1}" for i in range(samples_theta_given_x_N.size(1))],
-                           truths=theta.numpy(), title="Posterior Samples vs Input Theta")
-    figure.savefig('experiments/plots_small/posterior_samples_corner.png')
+                           truths=fixed_theta.numpy(), title="Posterior Samples vs Fixed Input Theta")
+    figure.savefig('experiments/plots_small/posterior_samples_fixed_theta_corner.png')
     plt.close(figure)
 
-    # Plotting the loss curve
+    # Plotting the overfitting loss curve
     plt.figure(figsize=(10, 6))
-    plt.plot(loss_values, label='Loss over Epochs')
+    plt.plot(overfit_loss_values, label='Overfitting Loss over Epochs')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Loss Curve')
+    plt.title('Overfitting Loss Curve')
     plt.legend()
-    plt.savefig('experiments/plots_small/loss_curve.png')
+    plt.savefig('experiments/plots_small/overfitting_loss_curve.png')
     plt.close()
+
 
