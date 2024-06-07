@@ -84,12 +84,18 @@ num_estimator.train()
 overfit_loss_values = []
 start_time = time_module.time()
 
+# Generate multiple batches of the same single example
+batch_size = 32
+fixed_theta_batch = fixed_theta.repeat(batch_size, 1)
+fixed_x_batch = fixed_x.repeat(batch_size, 1)
+num_target_batch = num_target.repeat(batch_size)
+
 for epoch in range(10000):
     optimizer.zero_grad()  # Clear gradients for the estimator
     num_optimizer.zero_grad()  # Clear gradients for the categorical model
     
-    loss_value = loss(fixed_theta, fixed_x)
-    num_loss_value = categorical_loss(num_estimator(fixed_x.unsqueeze(0)), num_target)  # Ensure x is batched
+    loss_value = loss(fixed_theta_batch, fixed_x_batch)
+    num_loss_value = categorical_loss(num_estimator(fixed_x_batch), num_target_batch)  # Ensure x is batched
     
     # Backpropagate the losses
     loss_value.backward()
@@ -111,14 +117,21 @@ estimator.eval()
 num_estimator.eval()
 
 with torch.no_grad():
-    samples_theta_given_x_N = estimator.flow(fixed_x).sample((1000,))
-    mean_sample = samples_theta_given_x_N.mean(0)
-    print("Fixed Input theta:", fixed_theta)
+    # Sampling 1000 thetas for each example in the batch
+    samples_theta_given_x_N = estimator.flow(fixed_x_batch).sample((1000,))
+    # Calculating the mean of sampled thetas across the samples dimension
+    mean_sample = samples_theta_given_x_N.mean(dim=0)
+    # Calculating the batch mean of sampled thetas across the batch dimension
+    batch_mean_sample = samples_theta_given_x_N.mean(dim=[0, 1])
+    
+    print("Fixed Input theta:", fixed_theta_batch[0])
     print("Mean of sampled thetas from posterior after overfitting:", mean_sample)
+    print("Batch mean of sampled thetas from posterior after overfitting:", batch_mean_sample)
 
     # Plotting the samples using corner
-    figure = corner.corner(samples_theta_given_x_N.numpy(), labels=[f"Param {i+1}" for i in range(samples_theta_given_x_N.size(1))],
-                           truths=fixed_theta.numpy(), title="Posterior Samples vs Fixed Input Theta")
+    figure = corner.corner(samples_theta_given_x_N.view(-1, samples_theta_given_x_N.size(-1)).numpy(), 
+                           labels=[f"Param {i+1}" for i in range(samples_theta_given_x_N.size(-1))],
+                           truths=fixed_theta_batch[0].numpy(), title="Posterior Samples vs Fixed Input Theta")
     figure.savefig('experiments/plots_small/posterior_samples_fixed_theta_corner.png')
     plt.close(figure)
 
@@ -131,5 +144,4 @@ with torch.no_grad():
     plt.legend()
     plt.savefig('experiments/plots_small/overfitting_loss_curve.png')
     plt.close()
-
 

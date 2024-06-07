@@ -102,8 +102,11 @@ if __name__ == '__main__':
         data, _ = make_moons(1, noise=noise)  # Generate a single data point with varying noise
         data = torch.from_numpy(data).float()
 
+        batch_size = 32  # Define the batch size
+        data_batch = data.expand(batch_size, -1, -1)  # Create a batch of the same single example
+
         for epoch in tqdm(range(10000), ncols=88, desc=f'Training with noise={noise}'):  # Increase epochs for overfitting
-            x = data  # Always use the same single example
+            x = data_batch  # Use the batch of the same single example
 
             loss(x).backward()
 
@@ -129,4 +132,3 @@ if __name__ == '__main__':
             log_p = flow.log_prob(data)
 
         print(f'Log probability for noise {noise}: {log_p.item()}')
-
