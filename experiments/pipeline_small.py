@@ -11,8 +11,13 @@ import numpy as np
 from lampe.plots import nice_rc
 from lampe.utils import GDStep
 
-from fmpe_deep_sets import DeepSetFMPE, DeepSetFMPELoss
+from lampe.inference import FMPE, FMPELoss
+# from fmpe_deep_sets_small import DeepSetFMPE, DeepSetFMPELoss
 from generate_burst_data import simulate_burst
+
+# Check if GPU is available and set device accordingly
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # Example usage
 time = np.linspace(0, 1.0, 1000)  # Time array 
@@ -55,84 +60,85 @@ def categorical_loss(probs, targets):
     return -torch.log(probs[torch.arange(probs.size(0)), targets]).mean()
 
 # Initialize models, loss functions, and optimizers
-estimator = DeepSetFMPE(theta_dim=4 * max_ncomp, x_dim=1000, freqs=5)
-loss = DeepSetFMPELoss(estimator)
-optimizer = optim.Adam(estimator.parameters(), lr=1e-3)
+estimator = FMPE(theta_dim=1 * max_ncomp, x_dim=1000, freqs=5).to(device)
+loss = FMPELoss(estimator)
+optimizer = optim.Adam(estimator.parameters(), lr=1e-4)
 step = GDStep(optimizer, clip=1.0)
 
-num_estimator = CategoricalModel(x_dim=1000, max_components=max_ncomp)
-num_optimizer = optim.Adam(num_estimator.parameters(), lr=1e-3)
+num_estimator = CategoricalModel(x_dim=1000, max_components=max_ncomp).to(device)
+num_optimizer = optim.Adam(num_estimator.parameters(), lr=1e-4)
 num_step = GDStep(num_optimizer, clip=1.0)
 
 # Generate a single sample for overfitting
 ncomp = 2
 burstparams = generate_burst_params(ncomp)
 ymodel, ycounts = simulate_burst(time, ncomp, burstparams, ybkg*10, return_model=True, noise_type='gaussian')
-fixed_theta = torch.from_numpy(burstparams).float()
-fixed_x = torch.from_numpy(ycounts).float()
-num_target = torch.tensor([ncomp - 1], dtype=torch.long)  # Adjust the target to 0-based index
+fixed_t0 = torch.from_numpy(burstparams[:ncomp]).float().to(device)  # Only t0
+fixed_x = torch.from_numpy(ycounts).float().to(device)
 
-# Ensure theta has the maximum theta dimension by padding
-pad_size = 4 * max_ncomp - fixed_theta.size(0)
-if pad_size > 0:
-    fixed_theta = F.pad(fixed_theta, (0, pad_size), "constant", 0)
+# Transform the time series data using Fourier Transform for better representation
+import torch.fft as fft
+fixed_x_fft = torch.abs(fft.fft(fixed_x))
 
 # Training loop for overfitting
 estimator.train()
-num_estimator.train()
 
 overfit_loss_values = []
 start_time = time_module.time()
 
-# Generate multiple batches of the same single example
-batch_size = 32
-fixed_theta_batch = fixed_theta.repeat(batch_size, 1)
-fixed_x_batch = fixed_x.repeat(batch_size, 1)
-num_target_batch = num_target.repeat(batch_size)
+# Generate a large batch of the same single example to improve overfitting
+batch_size = 1024
+fixed_t0_batch = fixed_t0.repeat(batch_size, 1)
+fixed_x_fft_batch = fixed_x_fft.repeat(batch_size, 1)
 
-for epoch in range(10000):
+# Increase the number of epochs for more extensive training
+num_epochs = 50000
+
+for epoch in range(num_epochs):
     optimizer.zero_grad()  # Clear gradients for the estimator
-    num_optimizer.zero_grad()  # Clear gradients for the categorical model
     
-    loss_value = loss(fixed_theta_batch, fixed_x_batch)
-    num_loss_value = categorical_loss(num_estimator(fixed_x_batch), num_target_batch)  # Ensure x is batched
+    loss_value = loss(fixed_t0_batch, fixed_x_fft_batch)
     
-    # Backpropagate the losses
+    # Backpropagate the loss
     loss_value.backward()
-    num_loss_value.backward()
     
-    # Step the optimizers
+    # Step the optimizer
     optimizer.step()
-    num_optimizer.step()
     
     overfit_loss_values.append(loss_value.item())
     if epoch % 1000 == 0:
-        print(f"Overfitting Epoch {epoch+1}, Loss: {loss_value.item()}, Categorical Loss: {num_loss_value.item()}")
+        print(f"Overfitting Epoch {epoch+1}, Loss: {loss_value.item()}")
 
 training_time = time_module.time() - start_time
 print(f"Training completed in {training_time:.2f} seconds.")
 
 # Evaluation after overfitting
 estimator.eval()
-num_estimator.eval()
 
 with torch.no_grad():
-    # Sampling 1000 thetas for each example in the batch
-    samples_theta_given_x_N = estimator.flow(fixed_x_batch).sample((1000,))
-    # Calculating the mean of sampled thetas across the samples dimension
-    mean_sample = samples_theta_given_x_N.mean(dim=0)
-    # Calculating the batch mean of sampled thetas across the batch dimension
-    batch_mean_sample = samples_theta_given_x_N.mean(dim=[0, 1])
+    # Sampling a large number of t0s for each example in the batch to assess overfitting
+    num_samples = 1000
+    samples_t0_given_x_N = estimator.flow(fixed_x_fft_batch).sample((num_samples,))
     
-    print("Fixed Input theta:", fixed_theta_batch[0])
-    print("Mean of sampled thetas from posterior after overfitting:", mean_sample)
-    print("Batch mean of sampled thetas from posterior after overfitting:", batch_mean_sample)
+    # Calculating the mean and standard deviation of sampled t0s across the samples dimension
+    mean_sample = samples_t0_given_x_N.mean(dim=0)
+    std_sample = samples_t0_given_x_N.std(dim=0)
+    
+    # Calculating the batch mean and standard deviation of sampled t0s across the batch dimension
+    batch_mean_sample = samples_t0_given_x_N.mean(dim=[0, 1])
+    batch_std_sample = samples_t0_given_x_N.std(dim=[0, 1])
+    
+    print("Fixed Input t0:", fixed_t0_batch[0])
+    print("Mean of sampled t0s from posterior after overfitting:", mean_sample)
+    print("Standard deviation of sampled t0s from posterior after overfitting:", std_sample)
+    print("Batch mean of sampled t0s from posterior after overfitting:", batch_mean_sample)
+    print("Batch standard deviation of sampled t0s from posterior after overfitting:", batch_std_sample)
 
     # Plotting the samples using corner
-    figure = corner.corner(samples_theta_given_x_N.view(-1, samples_theta_given_x_N.size(-1)).numpy(), 
-                           labels=[f"Param {i+1}" for i in range(samples_theta_given_x_N.size(-1))],
-                           truths=fixed_theta_batch[0].numpy(), title="Posterior Samples vs Fixed Input Theta")
-    figure.savefig('experiments/plots_small/posterior_samples_fixed_theta_corner.png')
+    figure = corner.corner(samples_t0_given_x_N.view(-1, samples_t0_given_x_N.size(-1)).cpu().numpy(), 
+                           labels=[f"t0_{i}" for i in range(samples_t0_given_x_N.size(-1))],
+                           truths=fixed_t0_batch[0].cpu().numpy(), title="Posterior Samples vs Fixed Input t0")
+    figure.savefig('plots_small/posterior_samples_fixed_t0_corner_fft_overfit.png')
     plt.close(figure)
 
     # Plotting the overfitting loss curve
@@ -142,6 +148,17 @@ with torch.no_grad():
     plt.ylabel('Loss')
     plt.title('Overfitting Loss Curve')
     plt.legend()
-    plt.savefig('experiments/plots_small/overfitting_loss_curve.png')
+    plt.savefig('plots_small/loss_curve_fft_overfit.png')
     plt.close()
+
+    # Plotting the conditioning data (time series)
+    plt.figure(figsize=(10, 6))
+    plt.plot(time, ycounts, label='Conditioning Time Series Data')
+    plt.xlabel('Time')
+    plt.ylabel('Counts')
+    plt.title('Conditioning Time Series Data')
+    plt.legend()
+    plt.savefig('plots_small/conditioning_data_time_series.png')
+    plt.close()
+
 
