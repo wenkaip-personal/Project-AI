@@ -93,42 +93,42 @@ class FlowMatchingLoss(nn.Module):
 if __name__ == '__main__':
     flow = CNF(2, hidden_features=[64] * 3)
 
-    # Training to overfit on several varied single examples
+    # Training to overfit on a single example with fixed noise
     loss = FlowMatchingLoss(flow)
     optimizer = torch.optim.Adam(flow.parameters(), lr=1e-3)
 
-    noise_levels = [0.01, 0.05, 0.1]  # Different noise levels for varied examples
-    for i, noise in enumerate(noise_levels):
-        data, _ = make_moons(1, noise=noise)  # Generate a single data point with varying noise
-        data = torch.from_numpy(data).float()
+    noise = 0.05  # Fixed noise value
+    data, _ = make_moons(1, noise=noise)  # Generate a single data point with fixed noise
+    data = torch.from_numpy(data).float()
 
-        batch_size = 32  # Define the batch size
-        data_batch = data.expand(batch_size, -1, -1)  # Create a batch of the same single example
+    batch_size = 32  # Define the batch size
+    data_batch = data.expand(batch_size, -1, -1)  # Create a batch of the same single example
 
-        for epoch in tqdm(range(10000), ncols=88, desc=f'Training with noise={noise}'):  # Increase epochs for overfitting
-            x = data_batch  # Use the batch of the same single example
+    for epoch in tqdm(range(10000), ncols=88, desc=f'Training with noise={noise}'):  # Increase epochs for overfitting
+        x = data_batch  # Use the batch of the same single example
 
-            loss(x).backward()
+        loss(x).backward()
 
-            optimizer.step()
-            optimizer.zero_grad()
+        optimizer.step()
+        optimizer.zero_grad()
 
-        # Sampling
-        with torch.no_grad():
-            z = torch.randn(10, 2)
-            x = flow.decode(z)
+    # Sampling
+    with torch.no_grad():
+        z = torch.randn(10, 2)
+        x = flow.decode(z)
 
-        plt.figure(figsize=(4.8, 4.8), dpi=150)
-        plt.scatter(*data.T, color='red', label='Ground Truth')  # Plot the ground truth data point
-        plt.scatter(*x.T, color='blue', alpha=0.5, label='Samples')  # Plot the generated samples
-        plt.legend()
-        plt.xlim(-1.5, 2.5)  # Fixed x-axis limits
-        plt.ylim(-1, 1.5)  # Fixed y-axis limits
-        plt.title(f'Overfitting on Single Example with Noise={noise}')
-        plt.savefig(f'experiments/plots_fm/moons_fm_single_example_noise_{noise}.pdf')
+    plt.figure(figsize=(4.8, 4.8), dpi=150)
+    plt.scatter(*data.T, color='red', label='Ground Truth')  # Plot the ground truth data point
+    plt.scatter(*x.T, color='blue', alpha=0.5, label='Samples')  # Plot the generated samples
+    plt.legend()
+    plt.xlim(-1.5, 2.5)  # Fixed x-axis limits
+    plt.ylim(-1, 1.5)  # Fixed y-axis limits
+    plt.title(f'Overfitting on Single Example with Noise={noise}')
+    plt.savefig(f'experiments/plots_fm/moons_fm_single_example_noise_{noise}.png')
 
-        # Log-likelihood
-        with torch.no_grad():
-            log_p = flow.log_prob(data)
+    # Log-likelihood
+    with torch.no_grad():
+        log_p = flow.log_prob(data)
 
-        print(f'Log probability for noise {noise}: {log_p.item()}')
+    print(f'Log probability for noise {noise}: {log_p.item()}')
+
