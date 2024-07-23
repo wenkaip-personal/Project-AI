@@ -39,6 +39,26 @@ def generate_burst_params(ncomp):
 
 ybkg = 1.0  # Background flux
 
+# Improved model architecture
+class ImprovedFMPE(FMPE):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.net = nn.Sequential(
+            nn.Linear(self.net[0].in_features, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, self.net[-1].out_features)
+        )
+
 class CategoricalModel(nn.Module):
     def __init__(self, x_dim, max_components):
         super(CategoricalModel, self).__init__()
@@ -59,11 +79,12 @@ def categorical_loss(probs, targets):
     targets = targets.long()  # Ensure targets are long type for indexing
     return -torch.log(probs[torch.arange(probs.size(0)), targets]).mean()
 
-# Initialize models, loss functions, and optimizers
-estimator = FMPE(theta_dim=1 * max_ncomp, x_dim=1000, freqs=5).to(device)
-loss = FMPELoss(estimator)
-optimizer = optim.Adam(estimator.parameters(), lr=1e-4)
-step = GDStep(optimizer, clip=1.0)
+# Experiment setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+estimator = ImprovedFMPE(theta_dim=1 * max_ncomp, x_dim=1000, freqs=20).to(device)
+loss_fn = FMPELoss(estimator)
+optimizer = optim.AdamW(estimator.parameters(), lr=1e-4, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2000, factor=0.5, verbose=True)
 
 num_estimator = CategoricalModel(x_dim=1000, max_components=max_ncomp).to(device)
 num_optimizer = optim.Adam(num_estimator.parameters(), lr=1e-4)
@@ -75,6 +96,9 @@ burstparams = generate_burst_params(ncomp)
 ymodel, ycounts = simulate_burst(time, ncomp, burstparams, ybkg*10, return_model=True, noise_type='gaussian')
 fixed_t0 = torch.from_numpy(burstparams[:ncomp]).float().to(device)  # Only t0
 fixed_x = torch.from_numpy(ycounts).float().to(device)
+
+# Normalize the input data
+fixed_x = (fixed_x - fixed_x.mean()) / fixed_x.std()
 
 # Transform the time series data using Fourier Transform for better representation
 import torch.fft as fft
@@ -91,23 +115,24 @@ batch_size = 1024
 fixed_t0_batch = fixed_t0.repeat(batch_size, 1)
 fixed_x_fft_batch = fixed_x_fft.repeat(batch_size, 1)
 
-# Increase the number of epochs for more extensive training
-num_epochs = 50000
-
+# Training loop
+num_epochs = 100000
 for epoch in range(num_epochs):
-    optimizer.zero_grad()  # Clear gradients for the estimator
-    
-    loss_value = loss(fixed_t0_batch, fixed_x_fft_batch)
-    
-    # Backpropagate the loss
-    loss_value.backward()
-    
-    # Step the optimizer
+    optimizer.zero_grad()
+    loss = loss_fn(fixed_t0_batch, fixed_x_fft_batch)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(estimator.parameters(), max_norm=1.0)
     optimizer.step()
-    
-    overfit_loss_values.append(loss_value.item())
+    scheduler.step(loss)
+
+    overfit_loss_values.append(loss.item())
     if epoch % 1000 == 0:
-        print(f"Overfitting Epoch {epoch+1}, Loss: {loss_value.item()}")
+        print(f"Epoch {epoch}, Loss: {loss.item()}, LR: {scheduler.get_last_lr()[0]}")
+
+    # Early stopping condition
+    if loss.item() < 1e-4:
+        print(f"Reached desired loss at epoch {epoch}")
+        break
 
 training_time = time_module.time() - start_time
 print(f"Training completed in {training_time:.2f} seconds.")
@@ -117,28 +142,46 @@ estimator.eval()
 
 with torch.no_grad():
     # Sampling a large number of t0s for each example in the batch to assess overfitting
-    num_samples = 1000
-    samples_t0_given_x_N = estimator.flow(fixed_x_fft_batch).sample((num_samples,))
+    num_samples = 50000
+    sample_batch_size = 1000  # Process samples in smaller batches
+    all_samples = []
+    
+    for i in range(0, num_samples, sample_batch_size):
+        batch_samples = estimator.flow(fixed_x_fft_batch[:1]).sample((sample_batch_size,))
+        all_samples.append(batch_samples)
+    
+    samples_t0_given_x_N = torch.cat(all_samples, dim=0)
     
     # Calculating the mean and standard deviation of sampled t0s across the samples dimension
     mean_sample = samples_t0_given_x_N.mean(dim=0)
     std_sample = samples_t0_given_x_N.std(dim=0)
     
-    # Calculating the batch mean and standard deviation of sampled t0s across the batch dimension
-    batch_mean_sample = samples_t0_given_x_N.mean(dim=[0, 1])
-    batch_std_sample = samples_t0_given_x_N.std(dim=[0, 1])
-    
     print("Fixed Input t0:", fixed_t0_batch[0])
     print("Mean of sampled t0s from posterior after overfitting:", mean_sample)
     print("Standard deviation of sampled t0s from posterior after overfitting:", std_sample)
-    print("Batch mean of sampled t0s from posterior after overfitting:", batch_mean_sample)
-    print("Batch standard deviation of sampled t0s from posterior after overfitting:", batch_std_sample)
 
     # Plotting the samples using corner
-    figure = corner.corner(samples_t0_given_x_N.view(-1, samples_t0_given_x_N.size(-1)).cpu().numpy(), 
-                           labels=[f"t0_{i}" for i in range(samples_t0_given_x_N.size(-1))],
-                           truths=fixed_t0_batch[0].cpu().numpy(), title="Posterior Samples vs Fixed Input t0")
-    figure.savefig('plots_small/posterior_samples_fixed_t0_corner_fft_overfit.png')
+    figure = corner.corner(
+        samples_t0_given_x_N.cpu().numpy(), 
+        labels=[f"t0_{i}" for i in range(samples_t0_given_x_N.size(-1))],
+        truths=fixed_t0_batch[0].cpu().numpy(),
+        title="Posterior Samples vs Fixed Input t0",
+        levels=(0.68, 0.95, 0.997),
+        color='blue',
+        truth_color='red',
+        show_titles=True,
+        title_fmt='.4f',
+        quantiles=[0.16, 0.5, 0.84],
+        smooth=1.0,
+        range=[(t0 - 0.01, t0 + 0.01) for t0 in fixed_t0_batch[0].cpu().numpy()],  # Set range to ±0.01 around true values
+        hist_kwargs={'density': True}
+    )
+
+    # Adjust the layout to prevent cutting off axis labels
+    plt.tight_layout()
+
+    # Save the figure with a higher DPI for better quality
+    figure.savefig('plots_small/posterior_samples_fixed_t0_corner_fft_overfit.png', dpi=300, bbox_inches='tight')
     plt.close(figure)
 
     # Plotting the overfitting loss curve
@@ -148,6 +191,7 @@ with torch.no_grad():
     plt.ylabel('Loss')
     plt.title('Overfitting Loss Curve')
     plt.legend()
+    plt.yscale('log')
     plt.savefig('plots_small/loss_curve_fft_overfit.png')
     plt.close()
 
@@ -161,4 +205,14 @@ with torch.no_grad():
     plt.savefig('plots_small/conditioning_data_time_series.png')
     plt.close()
 
-
+    # Examine the trajectory of samples
+    trajectory = estimator.flow(fixed_x_fft_batch[0]).sample((1000,))
+    plt.figure(figsize=(10, 6))
+    for i in range(trajectory.shape[1]):
+        plt.plot(trajectory[:, i].cpu().numpy(), label=f't0_{i}')
+    plt.xlabel('Sample')
+    plt.ylabel('t0 value')
+    plt.title('Trajectory of Sampled t0s')
+    plt.legend()
+    plt.savefig('plots_small/trajectory_samples.png')
+    plt.close()
