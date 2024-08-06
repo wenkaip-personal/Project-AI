@@ -10,8 +10,9 @@ import corner
 import numpy as np
 from lampe.plots import nice_rc
 from lampe.utils import GDStep
+import itertools
 
-from lampe.inference import FMPE, FMPELoss
+from fmpe_deep_sets import DeepSetFMPE, DeepSetFMPELoss
 from generate_burst_data import simulate_burst
 
 # Check if GPU is available and set device accordingly
@@ -38,26 +39,6 @@ def generate_burst_params(ncomp):
 
 ybkg = 1.0  # Background flux
 
-# Improved model architecture
-class ImprovedFMPE(FMPE):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.net = nn.Sequential(
-            nn.Linear(self.net[0].in_features, 512),
-            nn.LayerNorm(512),
-            nn.ELU(),
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.ELU(),
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.ELU(),
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.ELU(),
-            nn.Linear(512, self.net[-1].out_features)
-        )
-
 class CategoricalModel(nn.Module):
     def __init__(self, x_dim, max_components):
         super(CategoricalModel, self).__init__()
@@ -80,8 +61,8 @@ def categorical_loss(probs, targets):
 
 # Experiment setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-estimator = ImprovedFMPE(theta_dim=1 * max_ncomp, x_dim=1000, freqs=20).to(device)
-loss_fn = FMPELoss(estimator)
+estimator = DeepSetFMPE(theta_dim=1 * max_ncomp, x_dim=1000, freqs=20, hidden_dim=512).to(device)
+loss_fn = DeepSetFMPELoss(estimator)
 optimizer = optim.AdamW(estimator.parameters(), lr=1e-4, weight_decay=1e-5)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2000, factor=0.5, verbose=True)
 
@@ -111,7 +92,7 @@ fixed_t0_batch = fixed_t0.repeat(batch_size, 1)
 fixed_x_batch = fixed_x.repeat(batch_size, 1)
 
 # Training loop
-num_epochs = 100000
+num_epochs = 20000
 for epoch in range(num_epochs):
     optimizer.zero_grad()
     loss = loss_fn(fixed_t0_batch, fixed_x_batch)
@@ -125,12 +106,32 @@ for epoch in range(num_epochs):
         print(f"Epoch {epoch}, Loss: {loss.item()}, LR: {scheduler.get_last_lr()[0]}")
 
     # Early stopping condition
-    if loss.item() < 2.5e-5:
+    if loss.item() < 1e-4:
         print(f"Reached desired loss at epoch {epoch}")
         break
 
 training_time = time_module.time() - start_time
 print(f"Training completed in {training_time:.2f} seconds.")
+
+def check_permutation_invariance(estimator, fixed_x, fixed_t0, device):
+    estimator.eval()
+    with torch.no_grad():
+        # Generate all possible permutations of the fixed_t0
+        permutations = list(itertools.permutations(range(len(fixed_t0))))
+        
+        results = []
+        for perm in permutations:
+            permuted_t0 = fixed_t0[list(perm)]
+            
+            # Forward pass with the original and permuted t0
+            output_original = estimator(fixed_t0.unsqueeze(0), fixed_x.unsqueeze(0), torch.tensor([0.5], device=device))
+            output_permuted = estimator(permuted_t0.unsqueeze(0), fixed_x.unsqueeze(0), torch.tensor([0.5], device=device))
+            
+            # Check if the outputs are the same (up to a small tolerance)
+            is_invariant = torch.allclose(output_original, output_permuted, atol=1e-6)
+            results.append(is_invariant)
+        
+        return all(results)
 
 # Evaluation after overfitting
 estimator.eval()
@@ -176,7 +177,7 @@ with torch.no_grad():
     plt.tight_layout()
 
     # Save the figure with a higher DPI for better quality
-    figure.savefig('plots_small/posterior_samples_fixed_t0_corner_fft_overfit.png', dpi=300, bbox_inches='tight')
+    figure.savefig('plots_deep_sets/posterior_samples_fixed_t0_corner_fft_overfit.png', dpi=300, bbox_inches='tight')
     plt.close(figure)
 
     # Plotting the overfitting loss curve
@@ -187,7 +188,7 @@ with torch.no_grad():
     plt.title('Overfitting Loss Curve')
     plt.legend()
     plt.yscale('log')
-    plt.savefig('plots_small/loss_curve_fft_overfit.png')
+    plt.savefig('plots_deep_sets/loss_curve_fft_overfit.png')
     plt.close()
 
     # Plotting the conditioning data (time series)
@@ -197,7 +198,7 @@ with torch.no_grad():
     plt.ylabel('Counts')
     plt.title('Conditioning Time Series Data')
     plt.legend()
-    plt.savefig('plots_small/conditioning_data_time_series.png')
+    plt.savefig('plots_deep_sets/conditioning_data_time_series.png')
     plt.close()
 
     # Examine the trajectory of samples
@@ -209,5 +210,20 @@ with torch.no_grad():
     plt.ylabel('t0 value')
     plt.title('Trajectory of Sampled t0s')
     plt.legend()
-    plt.savefig('plots_small/trajectory_samples.png')
+    plt.savefig('plots_deep_sets/trajectory_samples.png')
     plt.close()
+
+print("\nChecking permutation invariance...")
+is_invariant = check_permutation_invariance(estimator, fixed_x, fixed_t0, device)
+print(f"Is the DeepSetFMPE network invariant to parameter permutations? {'Yes' if is_invariant else 'No'}")
+
+# If not invariant, let's check the outputs for different permutations
+if not is_invariant:
+    print("\nOutputs for different permutations:")
+    permutations = list(itertools.permutations(range(len(fixed_t0))))
+    for i, perm in enumerate(permutations):
+        permuted_t0 = fixed_t0[list(perm)]
+        output = estimator(permuted_t0.unsqueeze(0), fixed_x.unsqueeze(0), torch.tensor([0.5], device=device))
+        print(f"Permutation {i + 1}: {perm}")
+        print(f"Output: {output.squeeze().detach().cpu().numpy()}")
+        print()
