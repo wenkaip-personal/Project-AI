@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
+import time as time_module
 sns.set_style("whitegrid")
 import torch.nn.functional as F
 import torch
@@ -7,18 +8,22 @@ import torch.nn as nn
 import torch.optim as optim
 import corner
 import numpy as np
-from itertools import islice
-from lampe.data import JointLoader
 from lampe.plots import nice_rc
 from lampe.utils import GDStep
 from tqdm import trange
 
+from lampe.inference import FMPE, FMPELoss
 from fmpe_deep_sets import DeepSetFMPE, DeepSetFMPELoss
 from generate_burst_data import simulate_burst
+
+# Check if GPU is available and set device accordingly
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # Example usage
 time = np.linspace(0, 1.0, 1000)  # Time array 
 max_ncomp = 2  # Maximum number of components
+ncomp = 2
 
 # Parameters for the burst model
 t0_lower = time[0] + 0.1
@@ -35,6 +40,27 @@ def generate_burst_params(ncomp):
     return np.hstack([t0, amp*10, rise, skew])
 
 ybkg = 1.0  # Background flux
+
+# Improved model architecture
+class ImprovedFMPE(FMPE):
+    def __init__(self, theta_dim, x_dim, freqs):
+        super().__init__(theta_dim, x_dim, freqs)
+        input_dim = theta_dim + x_dim + 2 * freqs
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ELU(),
+            nn.Linear(512, theta_dim)
+        )
 
 class CategoricalModel(nn.Module):
     def __init__(self, x_dim, max_components):
@@ -56,17 +82,22 @@ def categorical_loss(probs, targets):
     targets = targets.long()  # Ensure targets are long type for indexing
     return -torch.log(probs[torch.arange(probs.size(0)), targets]).mean()
 
-estimator = DeepSetFMPE(theta_dim=4 * max_ncomp, x_dim=1000, freqs=5)
-loss = DeepSetFMPELoss(estimator)
-optimizer = optim.Adam(estimator.parameters(), lr=1e-3)
-scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, 128)
+# Experiment setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# estimator = ImprovedFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20).to(device)
+# loss_fn = FMPELoss(estimator)
+estimator = DeepSetFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20, hidden_dim=512).to(device)
+loss_fn = DeepSetFMPELoss(estimator)
+optimizer = optim.AdamW(estimator.parameters(), lr=1e-4, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2000, factor=0.5, verbose=True)
 step = GDStep(optimizer, clip=1.0)  # gradient descent step with gradient clipping
 
-num_estimator = CategoricalModel(x_dim=1000, max_components=max_ncomp)
-num_optimizer = optim.Adam(num_estimator.parameters(), lr=1e-3)
-num_scheduler = optim.lr_scheduler.CosineAnnealingLR(num_optimizer, 128)
+num_estimator = CategoricalModel(x_dim=1000, max_components=max_ncomp).to(device)
+num_optimizer = optim.AdamW(num_estimator.parameters(), lr=1e-4, weight_decay=1e-5)
+num_scheduler = optim.lr_scheduler.ReduceLROnPlateau(num_optimizer, patience=2000, factor=0.5, verbose=True)
 num_step = GDStep(num_optimizer, clip=1.0)
 
+# Training loop
 estimator.train()
 num_estimator.train()
 
@@ -75,143 +106,117 @@ for epoch in (bar := trange(128, unit='epoch')):
     num_losses = []
 
     for _ in range(256):  # 256 batches per epoch
-        # np.random.seed(None)  # Reset the seed to None to get different results each time
-        # ncomp = np.random.choice(range(1, max_ncomp+1))  # Randomly choose the number of components
-        ncomp = 2
         burstparams = generate_burst_params(ncomp)
         ymodel, ycounts = simulate_burst(time, ncomp, burstparams, ybkg*10, return_model=True, noise_type='gaussian')
-        theta = torch.from_numpy(burstparams).float()
-        x = torch.from_numpy(ycounts).float()
-        num_target = torch.tensor([ncomp - 1], dtype=torch.long)  # Adjust the target to 0-based index, ensure long type
+        t0 = torch.from_numpy(burstparams[:ncomp]).float().to(device)  # Only t0
+        x = torch.from_numpy(ycounts).float().to(device)
+        num_target = torch.tensor([ncomp - 1], dtype=torch.long).to(device)  # Adjust the target to 0-based index, ensure long type
 
-        # Ensure theta has the maximum theta dimension by padding
-        pad_size = 4 * max_ncomp - theta.size(0)
-        if pad_size > 0:
-            theta = F.pad(theta, (0, pad_size), "constant", 0)
+        # Normalize the input data
+        x = (x - x.mean()) / x.std()
 
-        losses.append(step(loss(theta, x)))
-        num_losses.append(num_step(categorical_loss(num_estimator(x.unsqueeze(0)), num_target)))  # Ensure x is batched
+        optimizer.zero_grad()
+        loss = loss_fn(t0, x)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(estimator.parameters(), max_norm=1.0)
+        optimizer.step()
+        scheduler.step(loss)
 
-    bar.set_postfix(loss=torch.stack(losses).mean().item(), num_loss=torch.stack(num_losses).mean().item())
+        num_optimizer.zero_grad()
+        num_loss = categorical_loss(num_estimator(x.unsqueeze(0)), num_target)
+        num_loss.backward()
+        torch.nn.utils.clip_grad_norm_(num_estimator.parameters(), max_norm=1.0)
+        num_optimizer.step()
+        num_scheduler.step(num_loss)
 
-# np.random.seed(None)  # Reset the seed to None to get different results each time
-# ncomp_star = np.random.choice(range(1, max_ncomp+1))
-ncomp_star = 2
-burstparams_star = generate_burst_params(ncomp_star)
-ymodel_star, ycounts_star = simulate_burst(time, ncomp_star, burstparams_star, ybkg*10, return_model=True, noise_type='gaussian')
-theta_star = torch.from_numpy(burstparams_star).float()
-x_star = torch.from_numpy(ycounts_star).float()
+        losses.append(loss.item())
+        num_losses.append(num_loss.item())
 
-# Ensure theta_star has the maximum theta dimension by padding
-pad_size = 4 * max_ncomp - theta_star.size(0)
-if pad_size > 0:
-    theta_star = F.pad(theta_star, (0, pad_size), "constant", 0)
+    bar.set_postfix(loss=torch.tensor(losses).mean().item(), num_loss=torch.tensor(num_losses).mean().item())
 
+burstparams_star = generate_burst_params(ncomp)
+ymodel_star, ycounts_star = simulate_burst(time, ncomp, burstparams_star, ybkg*10, return_model=True, noise_type='gaussian')
+t0_star = torch.from_numpy(burstparams_star[:ncomp]).float().to(device)
+x_star = torch.from_numpy(ycounts_star).float().to(device)
+
+# Evaluation
 estimator.eval()
 num_estimator.eval()
 
 with torch.no_grad():
-    log_p_theta_given_x_N = estimator.flow(x_star).log_prob(theta_star)
-    samples_theta_given_x_N = estimator.flow(x_star).sample((2**14,))
+    log_p_t0_given_x_N = estimator.flow(x_star).log_prob(t0_star)
+    samples_t0_given_x_N = estimator.flow(x_star).sample((2**14,))
 
     p_N_given_x = num_estimator(x_star)
 
 # Compute the joint posterior p(theta, N | x) = p(theta | x, N) * p(N | x)
-joint_posterior = torch.exp(log_p_theta_given_x_N).squeeze() * p_N_given_x.squeeze()
+joint_posterior = torch.exp(log_p_t0_given_x_N) * p_N_given_x
 
 print("Joint posterior p(theta, N | x):")
 print(joint_posterior)
 
-plt.rcParams.update(nice_rc(latex=True))  # nicer plot settings
+# Plotting the samples using corner
+figure = corner.corner(
+    samples_t0_given_x_N.cpu().numpy(), 
+    labels=[f"t0_{i}" for i in range(samples_t0_given_x_N.size(-1))],
+    truths=t0_star.cpu().numpy(),
+    title="Posterior Samples vs Ground Truth t0",
+    levels=(0.68, 0.95, 0.997),
+    color='blue',
+    truth_color='red',
+    show_titles=True,
+    title_fmt='.4f',
+    quantiles=[0.16, 0.5, 0.84],
+    smooth=1.0,
+    range=[(t0 - 0.01, t0 + 0.01) for t0 in t0_star.cpu().numpy()],  # Set range to ±0.01 around true values
+    hist_kwargs={'density': True}
+)
 
-# Plot the synthetic data
-fig, ax = plt.subplots(1, 1, figsize=(6,4))
-ax.plot(time, ycounts_star, color="black", label="Gaussian model counts")
-ax.plot(time, ymodel_star, color="orange", label="Noise-free model")
-ax.set_xlabel("Time [arbitrary units]")
-ax.set_ylabel("Flux [arbitrary units]")
-ax.set_title(f'Synthetic Data (N={ncomp_star})')
-ax.set_xlim(time[0], time[-1])
-ax.legend()
-fig.tight_layout() 
-fig.savefig('experiments/plots/synthetic_data.png')  # Save the plot to the 'plots' folder
-plt.close(fig)  # Close the current figure
+# Adjust the layout to prevent cutting off axis labels
+plt.tight_layout()
+
+# Save the figure with a higher DPI for better quality
+figure.savefig('experiments/plots/posterior_samples_ground_truth_t0_corner.png', dpi=300, bbox_inches='tight')
+plt.close(figure)
+
+# Plotting the loss curve
+plt.figure(figsize=(10, 6))
+plt.plot(losses, label='Loss over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Loss Curve')
+plt.legend()
+plt.savefig('experiments/plots/loss_curve.png')
+plt.close()
+
+# Plotting the conditioning data (time series)
+plt.figure(figsize=(10, 6))
+plt.plot(time, ycounts, label='Conditioning Time Series Data')
+plt.xlabel('Time')
+plt.ylabel('Counts')
+plt.title('Conditioning Time Series Data')
+plt.legend()
+plt.savefig('experiments/plots/conditioning_data_time_series.png')
+plt.close()
+
+# Examine the trajectory of samples
+trajectory = estimator.flow(x_star).sample((1000,))
+plt.figure(figsize=(10, 6))
+for i in range(trajectory.shape[1]):
+    plt.plot(trajectory[:, i].cpu().numpy(), label=f't0_{i}')
+plt.xlabel('Sample')
+plt.ylabel('t0 value')
+plt.title('Trajectory of Sampled t0s')
+plt.legend()
+plt.savefig('experiments/plots/trajectory_samples.png')
+plt.close()
 
 # Plot the posterior p(N | x)
 fig, ax = plt.subplots()
-ax.plot(range(1, max_ncomp+1), p_N_given_x.squeeze().numpy(), marker='o')
+ax.plot(range(1, max_ncomp+1), p_N_given_x.cpu().numpy(), marker='o')
 ax.set_xlabel('Number of Components N')
 ax.set_ylabel('Posterior Probability p(N | x)')
 ax.set_title('Posterior Distribution of N')
 fig.tight_layout()
 fig.savefig('experiments/plots/posterior_N.png')
 plt.close(fig)
-
-# Plot the observation x
-fig, ax = plt.subplots()
-ax.plot(time, x_star.numpy(), color="blue", label="Observed counts")
-ax.set_xlabel("Time [arbitrary units]")
-ax.set_ylabel("Counts")
-ax.set_title("Observation x")
-ax.legend()
-fig.tight_layout()
-fig.savefig('experiments/plots/observation_x.png')
-plt.close(fig)
-
-# Plot the joint posterior p(theta, N | x) as pair plots for various levels of N
-for n in range(1, max_ncomp + 1):
-    samples_n = samples_theta_given_x_N[:, :4*n].numpy()  # Convert tensor to numpy array
-    labels_n = [f'$t0_{i+1}$' for i in range(n)]
-    
-    # Filter out negative values for t0
-    mask = (samples_n[:, :n] > 0).all(axis=1)
-    samples_n = samples_n[mask]
-    
-    fig = corner.corner(samples_n[:, :n], labels=labels_n, truths=burstparams_star[:n], show_titles=True, 
-                        plot_contours=True, levels=(0.68, 0.95), color='blue')
-    fig.suptitle(f'Joint Posterior for N={n}', fontsize=16, y=1.05)  # Adjust the title position
-    fig.savefig(f'experiments/plots/joint_posterior_N{n}.png')
-    plt.close(fig)
-
-# Sampling from p(N | x) and p(theta | N, x)
-num_samples = 10000
-Ns = torch.multinomial(p_N_given_x, num_samples, replacement=True).squeeze() + 1  # Sample N from p(N | x)
-
-# Create a mask for the theta tensor based on sampled N values
-theta_mask = torch.zeros((num_samples, max_ncomp * 4), dtype=torch.bool)
-for i, n in enumerate(Ns):
-    theta_mask[i, :n*4] = True
-
-# Sample theta from p(theta | N, x) using Flow Matching
-thetas = torch.zeros((num_samples, max_ncomp * 4))
-for n in range(1, max_ncomp + 1):
-    mask_n = Ns == n
-    if mask_n.any():
-        x_n = x_star.repeat(mask_n.sum(), 1)
-        thetas_n = estimator.flow(x_n).sample((1,))
-        thetas[mask_n] = thetas_n.squeeze()
-
-# Apply the mask to the sampled thetas
-thetas = thetas[theta_mask].view(num_samples, -1)
-
-# Group the sampled thetas by N
-grouped_thetas = {n: thetas[Ns == n] for n in range(1, max_ncomp + 1)}
-
-# Plot the joint posterior p(theta, N | x) using the sampled thetas and Ns
-for n in range(1, max_ncomp + 1):
-    samples_n = grouped_thetas[n].numpy()
-    labels_n = [f'$t0_{i+1}$' for i in range(n)]
-    
-    # t0 must be positive
-    mask = (samples_n[:, :n] > 0).all(axis=1)
-    samples_n = samples_n[mask]
-    
-    if samples_n.shape[0] > 0:  # Check if there are any samples after filtering
-        fig = corner.corner(samples_n[:, :n], labels=labels_n, truths=burstparams_star[:n], show_titles=True, 
-                            plot_contours=True, levels=(0.68, 0.95), color='blue')
-        fig.suptitle(f'Joint Posterior for N={n} (Sampled)', fontsize=16, y=1.05)  # Adjust the title position
-        fig.savefig(f'experiments/plots/joint_posterior_sampled_N{n}.png')
-        plt.close(fig)
-    else:
-        print(f"No valid samples for N={n} after filtering.")
-
