@@ -23,7 +23,7 @@ print(f"Using device: {device}")
 # Example usage
 time = np.linspace(0, 1.0, 1000)  # Time array 
 max_ncomp = 2  # Maximum number of components
-ncomp = 2
+ncomp = 1
 
 # Parameters for the burst model
 t0_lower = time[0] + 0.1
@@ -84,10 +84,10 @@ def categorical_loss(probs, targets):
 
 # Experiment setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# estimator = ImprovedFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20).to(device)
-# loss_fn = FMPELoss(estimator)
-estimator = DeepSetFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20, hidden_dim=512).to(device)
-loss_fn = DeepSetFMPELoss(estimator)
+estimator = ImprovedFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20).to(device)
+loss_fn = FMPELoss(estimator)
+# estimator = DeepSetFMPE(theta_dim=1 * ncomp, x_dim=1000, freqs=20, hidden_dim=512).to(device)
+# loss_fn = DeepSetFMPELoss(estimator)
 optimizer = optim.AdamW(estimator.parameters(), lr=1e-4, weight_decay=1e-5)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2000, factor=0.5, verbose=True)
 step = GDStep(optimizer, clip=1.0)  # gradient descent step with gradient clipping
@@ -156,28 +156,40 @@ print("Joint posterior p(theta, N | x):")
 print(joint_posterior)
 
 # Plotting the samples using corner
-figure = corner.corner(
-    samples_t0_given_x_N.cpu().numpy(), 
-    labels=[f"t0_{i}" for i in range(samples_t0_given_x_N.size(-1))],
-    truths=t0_star.cpu().numpy(),
-    title="Posterior Samples vs Ground Truth t0",
-    levels=(0.68, 0.95, 0.997),
-    color='blue',
-    truth_color='red',
-    show_titles=True,
-    title_fmt='.4f',
-    quantiles=[0.16, 0.5, 0.84],
-    smooth=1.0,
-    range=[(t0 - 0.01, t0 + 0.01) for t0 in t0_star.cpu().numpy()],  # Set range to ±0.01 around true values
-    hist_kwargs={'density': True}
-)
+if samples_t0_given_x_N.numel() == 0 or torch.isnan(samples_t0_given_x_N).any():
+    print("Warning: Samples are empty or contain NaN values. Skipping corner plot.")
+else:
+    samples_np = samples_t0_given_x_N.cpu().numpy()
+    ranges = []
+    for i in range(samples_np.shape[1]):
+        q1, q3 = np.percentile(samples_np[:, i], [25, 75])
+        iqr = q3 - q1
+        range_min = max(q1 - 1.5 * iqr, samples_np[:, i].min())
+        range_max = min(q3 + 1.5 * iqr, samples_np[:, i].max())
+        ranges.append((range_min, range_max))
 
-# Adjust the layout to prevent cutting off axis labels
-plt.tight_layout()
+    figure = corner.corner(
+        samples_np,
+        labels=[f"t0_{i}" for i in range(samples_np.shape[1])],
+        truths=t0_star.cpu().numpy(),
+        title="Posterior Samples vs Ground Truth t0",
+        levels=(0.68, 0.95, 0.997),
+        color='blue',
+        truth_color='red',
+        show_titles=True,
+        title_fmt='.4f',
+        quantiles=[0.16, 0.5, 0.84],
+        smooth=1.0,
+        range=ranges,
+        hist_kwargs={'density': True}
+    )
 
-# Save the figure with a higher DPI for better quality
-figure.savefig('experiments/plots/posterior_samples_ground_truth_t0_corner.png', dpi=300, bbox_inches='tight')
-plt.close(figure)
+    # Adjust the layout to prevent cutting off axis labels
+    plt.tight_layout()
+
+    # Save the figure with a higher DPI for better quality
+    figure.savefig('experiments/plots/posterior_samples_ground_truth_t0_corner.png', dpi=300, bbox_inches='tight')
+    plt.close(figure)
 
 # Plotting the loss curve
 plt.figure(figsize=(10, 6))
