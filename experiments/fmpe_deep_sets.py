@@ -137,10 +137,10 @@ class DeepSetFMPE(nn.Module):
             phi_outputs.append(phi_output)
         
         # Average phi outputs
-        phi_sum = torch.mean(torch.stack(phi_outputs, dim=1), dim=1)
+        phi_mean = torch.mean(torch.stack(phi_outputs, dim=1), dim=1)
         
-        # Concatenate summed phi outputs with x and t_embedded
-        rho_input = torch.cat((phi_sum, x, t_embedded), dim=-1)
+        # Concatenate mean phi outputs with x and t_embedded
+        rho_input = torch.cat((phi_mean, x, t_embedded), dim=-1)
         
         # Apply rho to the concatenated input
         final_output = self.rho(rho_input)
