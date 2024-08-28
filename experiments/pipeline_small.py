@@ -186,7 +186,6 @@ with torch.no_grad():
     plt.ylabel('Loss')
     plt.title('Overfitting Loss Curve')
     plt.legend()
-    plt.yscale('log')
     plt.savefig('plots_small/loss_curve_fft_overfit.png')
     plt.close()
 
